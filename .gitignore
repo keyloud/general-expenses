@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+*.local
+work/
+
+**/bin/
+**/obj/
+
+
+.local/
+
+# Локальные кэши Visual Studio и персональные настройки разработчика.
+.vs/
+*.user
+*.suo
+
