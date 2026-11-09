@@ -11,7 +11,7 @@ public static class ReceiptMapping
         var removed = entity.Items.SingleOrDefault(x => x.IsDeleted);
         return new(participants, items, assignments, ReceiptCalculator.Calculate(items, assignments, participants),
             entity.Revision, entity.InstanceId,
-            removed is null ? null : new(ToItem(removed), removed.Position, Owners(removed, participants)));
+            removed is null ? null : new(ToItem(removed), removed.Position, Owners(removed, participants)), entity.Id, entity.Title, entity.CreatedAt);
     }
 
     private static ReceiptItem ToItem(ItemEntity item) => new(item.Id, item.Name, item.Detail, item.Amount);
@@ -20,9 +20,9 @@ public static class ReceiptMapping
 
     public static ReceiptEntity Create(ReceiptDto snapshot)
     {
-        var entity = new ReceiptEntity { InstanceId = snapshot.InstanceId, Revision = snapshot.Revision };
+        var entity = new ReceiptEntity { Id = snapshot.Id, Title = snapshot.Title, CreatedAt = snapshot.CreatedAt == default ? DateTimeOffset.UtcNow : snapshot.CreatedAt, InstanceId = snapshot.InstanceId, Revision = snapshot.Revision };
         entity.Participants = snapshot.Participants.Select((p, index) => new ParticipantEntity
-            { Id = p.Id, Name = p.Name, Initial = p.Initial, Position = index }).ToList();
+            { ReceiptId = entity.Id, Id = p.Id, Name = p.Name, Initial = p.Initial, Position = index }).ToList();
         Apply(entity, snapshot);
         return entity;
     }
@@ -41,7 +41,7 @@ public static class ReceiptMapping
         foreach (var entry in desired)
         {
             var item = entity.Items.SingleOrDefault(x => x.Id == entry.item.Id);
-            if (item is null) { item = new ItemEntity { Id = entry.item.Id }; entity.Items.Add(item); }
+            if (item is null) { item = new ItemEntity { ReceiptId = entity.Id, Id = entry.item.Id }; entity.Items.Add(item); }
             item.Name = entry.item.Name;
             item.Detail = entry.item.Detail;
             item.Amount = entry.item.Amount;
@@ -50,7 +50,7 @@ public static class ReceiptMapping
             item.Assignments.RemoveAll(x => !entry.owners.Contains(x.ParticipantId));
             foreach (var owner in entry.owners)
                 if (item.Assignments.All(x => x.ParticipantId != owner))
-                    item.Assignments.Add(new() { ItemId = item.Id, ParticipantId = owner });
+                    item.Assignments.Add(new() { ReceiptId = entity.Id, ItemId = item.Id, ParticipantId = owner });
         }
     }
 }

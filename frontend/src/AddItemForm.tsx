@@ -8,7 +8,7 @@ type Props = {
   initialItem?: Item;
   onCancel?: () => void;
 };
-
+// Компонент формы добавления/редактирования позиции. Валидация на клиенте, но окончательная проверка на сервере.
 export function AddItemForm({ onAdd, initialItem, onCancel }: Props) {
   const prefix = useId();
   const [name, setName] = useState(initialItem?.name ?? '');
@@ -17,7 +17,8 @@ export function AddItemForm({ onAdd, initialItem, onCancel }: Props) {
   const [message, setMessage] = useState('');
   const nameInput = useRef<HTMLInputElement>(null);
   const priceInput = useRef<HTMLInputElement>(null);
-
+  
+  // Функция обработки отправки формы. Проверяет поля, вызывает onAdd и очищает черновик только после успешного сохранения на сервере.
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmedName = name.trim();

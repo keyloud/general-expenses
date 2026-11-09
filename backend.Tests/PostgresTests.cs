@@ -1,6 +1,7 @@
 using GeneralExpenses.Api;
 using GeneralExpenses.Api.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Npgsql;
 using Xunit;
 
@@ -86,6 +87,69 @@ public sealed class PostgresTests
         await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
     }
 
+    [PostgresFact]
+    public async Task SeparateReceiptsKeepItemsSelectionsAndUndoIsolated()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var first = await database.Run(s => s.CreateAsync(new() { RequestId = Guid.NewGuid(), Title = "Обед", Participants = ["Лена", "Миша"] }));
+        var second = await database.Run(s => s.CreateAsync(new() { RequestId = Guid.NewGuid(), Title = "Кофе", Participants = ["Ира"] }));
+        Assert.Empty(first.Items);
+        Assert.Equal(new[] { "Лена", "Миша" }, first.Participants.Select(p => p.Name));
+        first = await database.Run(s => s.AddAsync(Item(first, "Суп", 10001), receiptId: first.Id));
+        var itemId = first.Items.Single().Id;
+        first = await database.Run(s => s.SelectAsync(itemId, first.Participants[0].Id, Select(first), receiptId: first.Id));
+        first = await database.Run(s => s.SelectAsync(itemId, first.Participants[1].Id, Select(first), receiptId: first.Id));
+        first = await database.Run(s => s.ReadAsync(receiptId: first.Id));
+        Assert.Equal(5001, first.Result.Totals[first.Participants[0].Id]);
+        var wrongItem = await Assert.ThrowsAsync<ReceiptException>(() => database.Run(s => s.EditAsync(itemId, Item(second, "Чужое", 100), receiptId: second.Id)));
+        Assert.Equal(404, wrongItem.Status);
+        var wrongPerson = await Assert.ThrowsAsync<ReceiptException>(() => database.Run(s => s.SelectAsync(itemId, second.Participants[0].Id, Select(first), receiptId: first.Id)));
+        Assert.Equal(400, wrongPerson.Status);
+        first = await database.Run(s => s.DeleteAsync(itemId, Version(first), receiptId: first.Id));
+        second = await database.Run(s => s.ResetAsync(Version(second), receiptId: second.Id));
+        first = await database.Run(s => s.ReadAsync(receiptId: first.Id));
+        Assert.NotNull(first.Deleted);
+        first = await database.Run(s => s.UndoAsync(Version(first), receiptId: first.Id));
+        Assert.Equal(10001, first.Result.Total);
+        Assert.Equal(5001, first.Result.Totals[first.Participants[0].Id]);
+        Assert.Empty((await database.Run(s => s.ReadAsync(receiptId: second.Id))).Items);
+        await using var db = database.Context();
+        var cards = await new ReceiptStore(db).ListAsync();
+        Assert.Equal(3, cards.Length); // Два новых и исходный демочек.
+        Assert.Equal(10001, cards.Single(x => x.Id == first.Id).Total);
+        Assert.Equal(0, cards.Single(x => x.Id == second.Id).Total);
+        Assert.Equal(404, (await Assert.ThrowsAsync<ReceiptException>(() => database.Run(s => s.ReadAsync(receiptId: "missing")))).Status);
+    }
+
+    [PostgresFact]
+    public async Task CreatingReceiptValidatesNamesAndIsIdempotent()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var request = new CreateReceiptRequest { RequestId = Guid.NewGuid(), Title = "Ужин", Participants = ["Оля", "Пётр"] };
+        var copies = await Task.WhenAll(database.Run(s => s.CreateAsync(request)), database.Run(s => s.CreateAsync(request)));
+        Assert.Equal(copies[0].Id, copies[1].Id);
+        var invalid = new[] {
+            new CreateReceiptRequest { RequestId = Guid.NewGuid(), Title = " ", Participants = ["Аня"] },
+            new CreateReceiptRequest { RequestId = Guid.NewGuid(), Title = "Ужин", Participants = [] },
+            new CreateReceiptRequest { RequestId = Guid.NewGuid(), Title = "Ужин", Participants = ["Аня", " аня "] },
+            new CreateReceiptRequest { RequestId = Guid.NewGuid(), Title = "Ужин", Participants = [new string('x', 101)] }
+        };
+        foreach (var input in invalid) Assert.Equal(400, (await Assert.ThrowsAsync<ReceiptException>(() => database.Run(s => s.CreateAsync(input)))).Status);
+        await using var db = database.Context();
+        Assert.Equal(2, (await new ReceiptStore(db).ListAsync()).Length);
+    }
+
+    [PostgresFact]
+    public async Task MetadataMigrationPreservesExistingReceipt()
+    {
+        await using var database = await TestDatabase.CreateAsync(legacy: true);
+        var state = await database.Run(s => s.ReadAsync());
+        Assert.Equal("Ужин с друзьями", state.Title);
+        Assert.Equal(7, state.Revision);
+        Assert.Equal("old-instance", state.InstanceId);
+        Assert.Equal(90000, state.Result.Totals["anya"]);
+        Assert.Equal("Пицца", state.Items.Single().Name);
+    }
     private sealed class TestDatabase(string connection, string admin, string name) : IAsyncDisposable
     {
         public ExpensesDbContext Context() => new(new DbContextOptionsBuilder<ExpensesDbContext>().UseNpgsql(connection).Options);
@@ -94,7 +158,7 @@ public sealed class PostgresTests
             await using var db = Context();
             return await action(new ReceiptStore(db));
         }
-        public static async Task<TestDatabase> CreateAsync()
+        public static async Task<TestDatabase> CreateAsync(bool legacy = false)
         {
             var builder = new NpgsqlConnectionStringBuilder(Environment.GetEnvironmentVariable("EXPENSES_TEST_CONNECTION")) { Database = "postgres" };
             var admin = builder.ConnectionString;
@@ -107,6 +171,17 @@ public sealed class PostgresTests
             try
             {
                 await using var db = result.Context();
+                if (legacy)
+                {
+                    var migrator = db.GetService<Microsoft.EntityFrameworkCore.Migrations.IMigrator>();
+                    await migrator.MigrateAsync(db.Database.GetMigrations().First());
+                    await db.Database.ExecuteSqlRawAsync("""
+                        INSERT INTO receipts ("Id", "InstanceId", "Revision") VALUES ('demo', 'old-instance', 7);
+                        INSERT INTO participants ("ReceiptId", "Id", "Name", "Initial", "Position") VALUES ('demo', 'anya', 'Аня', 'А', 0);
+                        INSERT INTO items ("ReceiptId", "Id", "Name", "Detail", "Amount", "Position", "IsDeleted") VALUES ('demo', 'pizza', 'Пицца', '', 90000, 0, false);
+                        INSERT INTO assignments ("ReceiptId", "ItemId", "ParticipantId") VALUES ('demo', 'pizza', 'anya');
+                        """);
+                }
                 await db.Database.MigrateAsync();
                 await db.Database.MigrateAsync(); // Повторное применение не меняет схему.
                 await ReceiptStore.InitializeAsync(db);

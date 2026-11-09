@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, requestReceipt, type Receipt } from './api';
 
-export function useReceipt() {
+export function useReceipt(receiptId: string) {
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -17,7 +17,7 @@ export function useReceipt() {
       const body = method === 'GET' ? undefined : {
         ...data, revision: receipt?.revision, instanceId: receipt?.instanceId,
       };
-      const next = await requestReceipt(path, method, body);
+      const next = await requestReceipt(receiptId, path, method, body);
       // Список, участники и итог заменяются вместе одним подтверждённым снимком сервера.
       setReceipt(next);
       return true;

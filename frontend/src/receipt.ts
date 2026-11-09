@@ -1,5 +1,6 @@
 // Формат данных интерфейса. Демочек и окончательные расчёты теперь находятся в C#.
-export type PersonId = 'anya' | 'boris' | 'vika';
+// Участники теперь создаются для конкретного счёта и получают собственные ID.
+export type PersonId = string;
 export type Item = { id: string; name: string; detail: string; amount: number };
 export type Assignments = Record<string, PersonId[]>;
 

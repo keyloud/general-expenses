@@ -4,6 +4,9 @@ public sealed class ReceiptState
 {
     private readonly string instanceId = Guid.NewGuid().ToString();
     private long revision;
+    private readonly string receiptId = "demo";
+    private readonly string title = "Ужин с друзьями";
+    private readonly DateTimeOffset createdAt = DateTimeOffset.UtcNow;
     private readonly Participant[] participants = [new("anya", "Аня", "А"), new("boris", "Борис", "Б"), new("vika", "Вика", "В")];
     private readonly List<ReceiptItem> items = [
         new("pizza", "Пицца «Маргарита»", "1 пицца · можно разделить", 90000),
@@ -21,6 +24,9 @@ public sealed class ReceiptState
     // Восстанавливаем бизнес-состояние из БД. Версия и идентификатор живут вместе с чеком.
     public ReceiptState(ReceiptDto snapshot)
     {
+        receiptId = snapshot.Id;
+        title = snapshot.Title;
+        createdAt = snapshot.CreatedAt;
         instanceId = snapshot.InstanceId;
         revision = snapshot.Revision;
         participants = snapshot.Participants.ToArray();
@@ -101,6 +107,5 @@ public sealed class ReceiptState
     private ReceiptDto Snapshot() => new(participants.ToArray(), items.ToArray(),
         assignments.ToDictionary(pair => pair.Key, pair => pair.Value.ToArray()),
         ReceiptCalculator.Calculate(items, assignments, participants), revision, instanceId,
-        deleted is null ? null : deleted with { Owners = deleted.Owners.ToArray() });
+        deleted is null ? null : deleted with { Owners = deleted.Owners.ToArray() }, receiptId, title, createdAt);
 }
-

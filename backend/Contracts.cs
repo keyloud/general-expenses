@@ -10,7 +10,7 @@ public record DeletedItem(ReceiptItem Item, int Index, string[] Owners); // 	У�
 ///
 public record ReceiptDto(Participant[] Participants, ReceiptItem[] Items,
     Dictionary<string, string[]> Assignments, ReceiptTotals Result, long Revision,
-    string InstanceId, DeletedItem? Deleted); // 	Полное состояние чека, которое сервер возвращает интерфейсу
+    string InstanceId, DeletedItem? Deleted, string Id = "demo", string Title = "Ужин с друзьями", DateTimeOffset CreatedAt = default); // 	Полное состояние чека, которое сервер возвращает интерфейсу
 /// <summary>
 /// Общие поля запроса на изменение.
 /// </summary>
@@ -38,4 +38,14 @@ public sealed class SelectionRequest : ChangeRequest
 public sealed class ReceiptException(int status, string message) : Exception(message)
 {
     public int Status { get; } = status;
+}
+
+
+// Краткие карточки списка не загружают все блюда и назначения участников.
+public record ReceiptSummaryDto(string Id, string Title, DateTimeOffset CreatedAt, int ParticipantCount, int ItemCount, long Total);
+public sealed class CreateReceiptRequest
+{
+    [Required] public Guid? RequestId { get; init; }
+    [Required, StringLength(100)] public string? Title { get; init; }
+    [Required, MinLength(1), MaxLength(12)] public string[]? Participants { get; init; }
 }

@@ -4,6 +4,8 @@ namespace GeneralExpenses.Api.Data;
 public sealed class ReceiptEntity
 {
     public string Id { get; set; } = "demo";
+    public string Title { get; set; } = "Ужин с друзьями";
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public string InstanceId { get; set; } = Guid.NewGuid().ToString();
     public long Revision { get; set; }
     public List<ParticipantEntity> Participants { get; set; } = [];
