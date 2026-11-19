@@ -4,11 +4,23 @@ namespace GeneralExpenses.Api.Data;
 
 public sealed class ExpensesDbContext(DbContextOptions<ExpensesDbContext> options) : DbContext(options)
 {
+    public DbSet<UserEntity> Users => Set<UserEntity>();
     public DbSet<ReceiptEntity> Receipts => Set<ReceiptEntity>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
+        var user = model.Entity<UserEntity>();
+        user.ToTable("users");
+        user.HasKey(x => x.Id);
+        user.Property(x => x.Id).ValueGeneratedNever();
+        user.Property(x => x.Name).HasMaxLength(256);
+        user.Property(x => x.Username).HasMaxLength(64);
+        // Старые счета принадлежат этому аккаунту, а не первому посетителю Telegram.
+        user.HasData(new UserEntity { Id = -1, Name = "Локальный разработчик" });
+
         var receipt = model.Entity<ReceiptEntity>();
+        receipt.Property(x => x.OwnerUserId).HasDefaultValue(-1L);
+        receipt.HasOne<UserEntity>().WithMany().HasForeignKey(x => x.OwnerUserId).OnDelete(DeleteBehavior.Restrict);
         receipt.ToTable("receipts"); // Настраиваем таблицу
         receipt.HasKey(x => x.Id); // Настраиваем первичный ключ
         receipt.Property(x => x.Title).HasMaxLength(100).HasDefaultValue("Ужин с друзьями"); // Настраиваем столбец с ограничением длины и значением по умолчанию
@@ -29,7 +41,7 @@ public sealed class ExpensesDbContext(DbContextOptions<ExpensesDbContext> option
         item.HasKey(x => new { x.ReceiptId, x.Id });
         item.Property(x => x.Name).HasMaxLength(100);
         // У одного чека может быть лишь одна позиция, ожидающая отмены удаления.
-        item.HasIndex(x => x.ReceiptId).IsUnique().HasFilter("\"IsDeleted\" = TRUE"); 3 // Настраиваем уникальный индекс по столбцу ReceiptId с фильтром, чтобы в таблице items могла быть только одна позиция с IsDeleted = TRUE для каждого чека
+        item.HasIndex(x => x.ReceiptId).IsUnique().HasFilter("\"IsDeleted\" = TRUE"); // Настраиваем уникальный индекс по столбцу ReceiptId с фильтром, чтобы в таблице items могла быть только одна позиция с IsDeleted = TRUE для каждого чека
         item.HasMany(x => x.Assignments).WithOne().HasForeignKey(x => new { x.ReceiptId, x.ItemId });
 
         var assignment = model.Entity<AssignmentEntity>();

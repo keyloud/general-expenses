@@ -22,11 +22,13 @@ export async function requestJson<T>(path: string, method = 'GET', body?: object
   // интерфейс предложит обновить чек, а версия защитит от повторного применения.
   const response = await fetch(`/api${path}`, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    credentials: 'same-origin',
+    headers: { 'X-Requested-With': 'Porovnu', ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000),
   });
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith('/auth/')) window.dispatchEvent(new Event('session-expired'));
     const problem = await response.json().catch(() => null);
     throw new ApiError(problem?.title ?? 'Сервер недоступен. Проверьте его запуск.', response.status);
   }

@@ -1,9 +1,17 @@
 namespace GeneralExpenses.Api.Data;
 
 // Сущности БД отделены от DTO: они описывают строки таблиц и отношения между ними.
+// Telegram ID помещается в long. -1 зарезервирован за локальным учебным аккаунтом.
+public sealed class UserEntity
+{
+    public long Id { get; set; }
+    public string Name { get; set; } = "";
+    public string? Username { get; set; }
+}
 public sealed class ReceiptEntity
 {
     public string Id { get; set; } = "demo";
+    public long OwnerUserId { get; set; } = -1;
     public string Title { get; set; } = "Ужин с друзьями";
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public string InstanceId { get; set; } = Guid.NewGuid().ToString();

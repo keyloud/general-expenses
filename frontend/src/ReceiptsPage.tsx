@@ -33,7 +33,7 @@ export function ReceiptsPage() {
       <h2>{receipt.title}</h2><p>Участников: {receipt.participantCount} · Позиций: {receipt.itemCount}</p>
       <div className={s.cardBottom}><time dateTime={receipt.createdAt}>{new Date(receipt.createdAt).toLocaleDateString('ru-RU', {day:'numeric',month:'long',year:'numeric'})}</time><strong>{money(receipt.total)}</strong></div>
     </a>)}</div>
-    <footer className={s.footer}>Пока это общий список счетов. Личные аккаунты появятся позже.</footer>
+    <footer className={s.footer}>Эти счета видны только вам. Приглашение друзей появится на следующем этапе.</footer>
   </main>;
 }
 

@@ -1,3 +1,4 @@
+using GeneralExpenses.Api.Auth;
 using GeneralExpenses.Api;
 using GeneralExpenses.Api.Data;
 using Microsoft.EntityFrameworkCore;
@@ -114,7 +115,7 @@ public sealed class PostgresTests
         Assert.Equal(5001, first.Result.Totals[first.Participants[0].Id]);
         Assert.Empty((await database.Run(s => s.ReadAsync(receiptId: second.Id))).Items);
         await using var db = database.Context();
-        var cards = await new ReceiptStore(db).ListAsync();
+        var cards = await new ReceiptStore(db, new TestUser(-1)).ListAsync();
         Assert.Equal(3, cards.Length); // Два новых и исходный демочек.
         Assert.Equal(10001, cards.Single(x => x.Id == first.Id).Total);
         Assert.Equal(0, cards.Single(x => x.Id == second.Id).Total);
@@ -136,7 +137,7 @@ public sealed class PostgresTests
         };
         foreach (var input in invalid) Assert.Equal(400, (await Assert.ThrowsAsync<ReceiptException>(() => database.Run(s => s.CreateAsync(input)))).Status);
         await using var db = database.Context();
-        Assert.Equal(2, (await new ReceiptStore(db).ListAsync()).Length);
+        Assert.Equal(2, (await new ReceiptStore(db, new TestUser(-1)).ListAsync()).Length);
     }
 
     [PostgresFact]
@@ -150,13 +151,50 @@ public sealed class PostgresTests
         Assert.Equal(90000, state.Result.Totals["anya"]);
         Assert.Equal("Пицца", state.Items.Single().Name);
     }
+    [PostgresFact]
+    public async Task UsersCannotReadChangeOrRetryCreationOfAnotherUsersReceipt()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await using (var db = database.Context())
+        {
+            db.Users.AddRange(new UserEntity { Id = 101, Name = "Первый" }, new UserEntity { Id = 202, Name = "Второй" });
+            await db.SaveChangesAsync();
+        }
+        var request = new CreateReceiptRequest { RequestId = Guid.NewGuid(), Title = "Личный ужин", Participants = ["Аня"] };
+        var owned = await database.Run(s => s.CreateAsync(request), 101);
+        owned = await database.Run(s => s.AddAsync(Item(owned, "Суп", 10001), receiptId: owned.Id), 101);
+        var item = owned.Items.Single().Id;
+        Func<ReceiptStore, Task<ReceiptDto>>[] forbidden =
+        [
+            s => s.ReadAsync(receiptId: owned.Id),
+            s => s.AddAsync(Item(owned, "Чужая запись", 1), receiptId: owned.Id),
+            s => s.EditAsync(item, Item(owned, "Подмена", 1), receiptId: owned.Id),
+            s => s.DeleteAsync(item, Version(owned), receiptId: owned.Id),
+            s => s.SelectAsync(item, owned.Participants[0].Id, Select(owned), receiptId: owned.Id),
+            s => s.ResetAsync(Version(owned), receiptId: owned.Id),
+            s => s.UndoAsync(Version(owned), receiptId: owned.Id),
+            s => s.CreateAsync(request)
+        ];
+        foreach (var action in forbidden)
+            Assert.Equal(404, (await Assert.ThrowsAsync<ReceiptException>(() => database.Run(action, 202))).Status);
+        await using (var db = database.Context())
+        {
+            Assert.Empty(await new ReceiptStore(db, new TestUser(202)).ListAsync());
+            Assert.Equal(owned.Id, Assert.Single(await new ReceiptStore(db, new TestUser(101)).ListAsync()).Id);
+            Assert.Equal("demo", Assert.Single(await new ReceiptStore(db, new TestUser(-1)).ListAsync()).Id);
+        }
+        var after = await database.Run(s => s.ReadAsync(receiptId: owned.Id), 101);
+        Assert.Equal(owned.Revision, after.Revision);
+        Assert.Equal(10001, after.Result.Total);
+    }
+    private sealed record TestUser(long Id) : ICurrentUser;
     private sealed class TestDatabase(string connection, string admin, string name) : IAsyncDisposable
     {
         public ExpensesDbContext Context() => new(new DbContextOptionsBuilder<ExpensesDbContext>().UseNpgsql(connection).Options);
-        public async Task<ReceiptDto> Run(Func<ReceiptStore, Task<ReceiptDto>> action)
+        public async Task<ReceiptDto> Run(Func<ReceiptStore, Task<ReceiptDto>> action, long userId = -1)
         {
             await using var db = Context();
-            return await action(new ReceiptStore(db));
+            return await action(new ReceiptStore(db, new TestUser(userId)));
         }
         public static async Task<TestDatabase> CreateAsync(bool legacy = false)
         {

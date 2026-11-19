@@ -1,3 +1,4 @@
+using GeneralExpenses.Api.Auth;
 using System.Data;
 using GeneralExpenses.Api.Data;
 using Microsoft.EntityFrameworkCore;
@@ -6,16 +7,16 @@ namespace GeneralExpenses.Api;
 
 // Scoped-сервис: один DbContext на HTTP-запрос. DbContext не потокобезопасен,
 // поэтому его нельзя регистрировать Singleton, как прежнее хранилище в памяти.
-public sealed class ReceiptStore(ExpensesDbContext db)
+public sealed class ReceiptStore(ExpensesDbContext db, ICurrentUser current)
 {
     private IQueryable<ReceiptEntity> Graph => db.Receipts
-        .Include(x => x.Participants).Include(x => x.Items).ThenInclude(x => x.Assignments).AsSplitQuery(); // AsSplitQuery разделяет один большой SQL на несколько SELECT, чтобы избежать переполнения буфера PostgreSQL.
+        .Include(x => x.Participants).Include(x => x.Items).ThenInclude(x => x.Assignments).AsSplitQuery(); // AsSplitQuery разделяет один большой SQL на несколько SELECT, чтобы не размножать строки при JOIN нескольких коллекций.
 
     public async Task<ReceiptDto> ReadAsync(CancellationToken ct = default, string receiptId = "demo")
     {
         // Несколько SELECT должны видеть одну версию данных даже при параллельной записи.
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct);
-        var entity = await Graph.AsNoTracking().SingleOrDefaultAsync(x => x.Id == receiptId, ct) ?? throw new ReceiptException(404, "Счёт не найден.");
+        var entity = await Graph.AsNoTracking().SingleOrDefaultAsync(x => x.Id == receiptId && x.OwnerUserId == current.Id, ct) ?? throw new ReceiptException(404, "Счёт не найден.");
         var result = ReceiptMapping.ToDto(entity);
         await transaction.CommitAsync(ct);
         return result;
@@ -26,8 +27,8 @@ public sealed class ReceiptStore(ExpensesDbContext db)
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         // FOR UPDATE блокирует строку чека в PostgreSQL до конца транзакции.
         // Это работает и при двух процессах API, в отличие от C# lock.
-        await db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM receipts WHERE \"Id\" = {receiptId} FOR UPDATE", ct);
-        var entity = await Graph.SingleOrDefaultAsync(x => x.Id == receiptId, ct) ?? throw new ReceiptException(404, "Счёт не найден.");
+        await db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM receipts WHERE \"Id\" = {receiptId} AND \"OwnerUserId\" = {current.Id} FOR UPDATE", ct);
+        var entity = await Graph.SingleOrDefaultAsync(x => x.Id == receiptId && x.OwnerUserId == current.Id, ct) ?? throw new ReceiptException(404, "Счёт не найден.");
         var state = new ReceiptState(ReceiptMapping.ToDto(entity));
         var result = change(state); // Здесь проверяются revision и бизнес-правила.
         var previousDeleted = entity.Items.SingleOrDefault(x => x.IsDeleted);
@@ -54,7 +55,7 @@ public sealed class ReceiptStore(ExpensesDbContext db)
     public Task<ReceiptDto> SelectAsync(string id, string personId, SelectionRequest request, CancellationToken ct = default, string receiptId = "demo") => ChangeAsync(s => s.Select(id, personId, request), ct, receiptId);
     public Task<ReceiptDto> ResetAsync(ChangeRequest request, CancellationToken ct = default, string receiptId = "demo") => ChangeAsync(s => s.Reset(request), ct, receiptId);
 
-    public Task<ReceiptSummaryDto[]> ListAsync(CancellationToken ct = default) => db.Receipts.AsNoTracking()
+    public Task<ReceiptSummaryDto[]> ListAsync(CancellationToken ct = default) => db.Receipts.AsNoTracking().Where(x => x.OwnerUserId == current.Id)
         .OrderByDescending(x => x.CreatedAt).ThenBy(x => x.Id)
         .Select(x => new ReceiptSummaryDto(x.Id, x.Title, x.CreatedAt, x.Participants.Count,
             x.Items.Count(i => !i.IsDeleted), x.Items.Where(i => !i.IsDeleted).Sum(i => i.Amount)))
@@ -77,6 +78,7 @@ public sealed class ReceiptStore(ExpensesDbContext db)
         var existing = await Graph.SingleOrDefaultAsync(x => x.Id == id, ct);
         if (existing is not null)
         {
+            if (existing.OwnerUserId != current.Id) throw new ReceiptException(404, "Счёт не найден.");
             var sameNames = existing.Participants.OrderBy(x => x.Position).Select(x => x.Name).SequenceEqual(names);
             if (existing.Title != title || !sameNames) throw new ReceiptException(409, "Этот запрос уже создал другой счёт. Обновите список.");
             await transaction.CommitAsync(ct);
@@ -86,7 +88,9 @@ public sealed class ReceiptStore(ExpensesDbContext db)
             System.Globalization.StringInfo.GetNextTextElement(name))).ToArray();
         var snapshot = new ReceiptDto(people, [], [], ReceiptCalculator.Calculate([], new Dictionary<string, string[]>(), people),
             0, Guid.NewGuid().ToString(), null, id, title, DateTimeOffset.UtcNow);
-        db.Receipts.Add(ReceiptMapping.Create(snapshot));
+        var entity = ReceiptMapping.Create(snapshot);
+        entity.OwnerUserId = current.Id;
+        db.Receipts.Add(entity);
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
         return snapshot;
@@ -99,7 +103,9 @@ public sealed class ReceiptStore(ExpensesDbContext db)
         if (!await db.Receipts.AnyAsync(ct))
         {
             var snapshot = import ?? new ReceiptState().Read();
-            db.Receipts.Add(ReceiptMapping.Create(snapshot));
+            var entity = ReceiptMapping.Create(snapshot);
+            entity.OwnerUserId = -1;
+            db.Receipts.Add(entity);
             await db.SaveChangesAsync(ct);
         }
         else if (import is not null)
