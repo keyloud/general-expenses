@@ -26,11 +26,7 @@ public sealed class AuthController(ExpensesDbContext db, IConfiguration configur
     {
         var user = TelegramInitData.Validate(request.InitData!, configuration["Telegram:BotToken"] ?? "", DateTimeOffset.UtcNow);
         if (user is null) return Problem(statusCode: 401, title: "Не удалось подтвердить вход. Закройте приложение и откройте его заново в Telegram.");
-        // UPSERT делает два одновременных входа одного пользователя безопасными.
-        await db.Database.ExecuteSqlInterpolatedAsync($"""
-            INSERT INTO users ("Id", "Name", "Username") VALUES ({user.Id}, {user.Name}, {user.Username})
-            ON CONFLICT ("Id") DO UPDATE SET "Name" = EXCLUDED."Name", "Username" = EXCLUDED."Username"
-            """, ct);
+        await TelegramUsers.SaveAsync(db, user, ct);
         await SignIn(user.Id);
         return Ok(new { id = user.Id.ToString(), user.Name, user.Username, isLocal = false });
     }

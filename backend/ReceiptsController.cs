@@ -6,6 +6,17 @@ namespace GeneralExpenses.Api;
 public sealed class ReceiptsController(ReceiptStore store) : ControllerBase
 {
     [HttpGet] public Task<ReceiptSummaryDto[]> List() => store.ListAsync(HttpContext.RequestAborted);
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> Delete(string id, ChangeRequest version)
+    {
+        try
+        {
+            await store.DeleteReceiptAsync(id, version, HttpContext.RequestAborted);
+            return NoContent();
+        }
+        catch (ReceiptException error) { return Problem(statusCode: error.Status, title: error.Message); }
+    }
+
     [HttpPost] public async Task<ActionResult<ReceiptDto>> Create(CreateReceiptRequest request)
     {
         try

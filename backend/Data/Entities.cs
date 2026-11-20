@@ -19,8 +19,21 @@ public sealed class ReceiptEntity
     public List<ParticipantEntity> Participants { get; set; } = [];
     public List<ItemEntity> Items { get; set; } = [];
 }
+// Храним только ID, чтобы повтор старого запроса создания не воскресил удалённый чек.
+public sealed class DeletedReceiptEntity
+{
+    public required string Id { get; init; }
+}
+
 public sealed class ParticipantEntity
 {
+    public bool Finished { get; set; }
+    // При подтверждении за участника итог получает администратор из серверной сессии.
+    public long? ConfirmedByAdminId { get; set; }
+    // Имя для расчёта существует до того, как участник примет приглашение.
+    public long? UserId { get; set; }
+    public string? InviteHash { get; set; }
+    public DateTimeOffset? InviteExpiresAt { get; set; }
     public string ReceiptId { get; set; } = "demo";
     public string Id { get; set; } = "";
     public string Name { get; set; } = "";
@@ -29,19 +42,31 @@ public sealed class ParticipantEntity
 }
 public sealed class ItemEntity
 {
+    public int Quantity { get; set; } = 1;
+    public bool ByPortion { get; set; }
     public string ReceiptId { get; set; } = "demo";
     public string Id { get; set; } = "";
     public string Name { get; set; } = "";
     public string Detail { get; set; } = "";
     public long Amount { get; set; }
     public int Position { get; set; }
-    // Последнюю удалённую позицию сохраняем для отмены, но исключаем из расчёта.
-    public bool IsDeleted { get; set; }
     public List<AssignmentEntity> Assignments { get; set; } = [];
 }
 public sealed class AssignmentEntity
 {
+    public int Count { get; set; } = 1;
     public string ReceiptId { get; set; } = "demo";
     public string ItemId { get; set; } = "";
     public string ParticipantId { get; set; } = "";
+}
+
+// Снимок личного итога сохраняется вместе с подтверждением чека.
+public sealed class ReceiptMessage
+{
+    public long Id { get; set; }
+    public required string ReceiptId { get; set; }
+    public long ChatId { get; set; }
+    public required string Text { get; set; }
+    public string? OwnerLink { get; set; }
+    public DateTimeOffset NextAttempt { get; set; }
 }

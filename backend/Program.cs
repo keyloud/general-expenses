@@ -40,6 +40,16 @@ var connection = builder.Configuration.GetConnectionString("Expenses")
     ?? throw new InvalidOperationException("Задайте ConnectionStrings__Expenses или запустите scripts/Start-Backend.ps1.");
 builder.Services.AddDbContext<ExpensesDbContext>(options => options.UseNpgsql(connection));
 builder.Services.AddScoped<ReceiptStore>();
+builder.Services.AddScoped<InvitationStore>();
+builder.Services.AddScoped<TelegramInvitationShare>();
+// Токен находится в URL Bot API, поэтому журналирование HttpClient отключено.
+builder.Services.AddHttpClient("TelegramBot", c => c.Timeout = TimeSpan.FromSeconds(40))
+    .RemoveAllLoggers().ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+if (!string.IsNullOrWhiteSpace(builder.Configuration["Telegram:MiniAppUrl"]))
+{
+    builder.Services.AddHostedService<TelegramChatBot>();
+    builder.Services.AddHostedService<SettlementSender>();
+}
 builder.Services.AddProblemDetails();
 var app = builder.Build();
 // Миграции выполняются явной командой, а не при каждом HTTP-запуске.
@@ -63,6 +73,13 @@ await using (var scope = app.Services.CreateAsyncScope())
     if (importIndex >= 0) return;
 }
 app.UseExceptionHandler();
+// В режиме Telegram preview --webroot указывает на результат сборки React.
+// Стартовая страница нужна до входа, поэтому статика подключается до авторизации API.
+if (app.Configuration["webroot"] is not null)
+{
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
+}
 // Браузер не может отправить этот заголовок с чужого сайта без разрешения CORS.
 // CORS не включён: интерфейс и API обслуживаются с одного origin (в dev — proxy Vite).
 app.Use(async (context, next) =>

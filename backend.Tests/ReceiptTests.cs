@@ -18,7 +18,7 @@ public class ReceiptTests
     }
 
     [Fact]
-    public void EditDeleteUndoPreserveOwnersAndPosition()
+    public void EditPreservesOwnersAndDeleteRemovesPosition()
     {
         var store = new ReceiptState();
         var state = store.Select("pizza", "anya", Select(store.Read()));
@@ -29,9 +29,7 @@ public class ReceiptTests
         state = store.Delete("pizza", Version(state));
         Assert.False(state.Assignments.ContainsKey("pizza"));
         Assert.Equal(0, state.Result.Totals["anya"]);
-        state = store.Undo(Version(state));
-        Assert.Equal("pizza", state.Items[0].Id);
-        Assert.Equal(50001, state.Result.Totals["anya"]);
+        Assert.DoesNotContain(state.Items, i => i.Id == "pizza");
     }
 
     [Fact]
@@ -60,14 +58,13 @@ public class ReceiptTests
     }
 
     [Fact]
-    public void EmptyReceiptAndResetUndoAreConsistent()
+    public void EmptyReceiptAndResetAreConsistent()
     {
         var store = new ReceiptState();
         var state = store.Select("pizza", "anya", Select(store.Read()));
         state = store.Delete("pizza", Version(state));
         state = store.Reset(Version(state));
-        state = store.Undo(Version(state));
-        Assert.Empty(state.Assignments["pizza"]);
+        Assert.False(state.Assignments.ContainsKey("pizza"));
         foreach (var item in state.Items) state = store.Delete(item.Id, Version(state));
         Assert.Empty(state.Items);
         Assert.Equal(0, state.Result.Total);

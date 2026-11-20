@@ -17,7 +17,6 @@ public sealed class ReceiptState
         new("drink3", "Домашний лимонад", "Стакан 3 из 3 · 300 мл", 20000)
     ];
     private readonly Dictionary<string, string[]> assignments = [];
-    private DeletedItem? deleted;
 
     public ReceiptState() { }
 
@@ -33,7 +32,6 @@ public sealed class ReceiptState
         items.Clear();
         items.AddRange(snapshot.Items);
         foreach (var pair in snapshot.Assignments) assignments[pair.Key] = pair.Value.ToArray();
-        deleted = snapshot.Deleted;
     }
 
     public ReceiptDto Read() => Snapshot();
@@ -66,46 +64,77 @@ public sealed class ReceiptState
     public ReceiptDto Add(ItemRequest request) => Change(request, () =>
     {
         Validate(request);
-        items.Add(new(Guid.NewGuid().ToString(), request.Name!.Trim(), "1 порция · добавлено вручную", request.Amount!.Value));
+        items.Add(UpdatedItem(new(Guid.NewGuid().ToString(), "", "", 0), request));
     });
     public ReceiptDto Edit(string id, ItemRequest request) => Change(request, () =>
     {
         Validate(request);
         var index = Index(id);
-        items[index] = items[index] with { Name = request.Name!.Trim(), Amount = request.Amount!.Value };
+        items[index] = UpdatedItem(items[index], request);
     });
+
+    private ReceiptItem UpdatedItem(ReceiptItem item, ItemRequest request)
+    {
+        var quantity = request.Quantity ?? item.Quantity;
+        var byPortion = request.ByPortion ?? item.ByPortion;
+        var amount = request.Amount!.Value;
+        if (quantity is < 1 or > 999 || amount % quantity != 0)
+            throw new ReceiptException(400, "Укажите количество от 1 до 999 и цену за единицу в целых копейках.");
+        var counts = byPortion ? item.Counts : null;
+        if (byPortion && !item.ByPortion && assignments.GetValueOrDefault(item.Id) is { Length: > 0 } owners)
+        {
+            if (quantity < owners.Length)
+                throw new ReceiptException(400, $"Позицию выбрали {owners.Length} чел. Для перехода на целые порции укажите количество не меньше {owners.Length}.");
+            // Все выбранные места сохраняются; лишние целые порции получают первые по порядку в чеке.
+            counts = new Dictionary<string, int>();
+            var index = 0;
+            foreach (var person in participants.Where(p => owners.Contains(p.Id)))
+                counts[person.Id] = quantity / owners.Length + (index++ < quantity % owners.Length ? 1 : 0);
+        }
+        if (quantity < (counts?.Values.Sum() ?? 0))
+            throw new ReceiptException(409, "Часть этих порций уже выбрана.");
+        return item with { Name = request.Name!.Trim(), Amount = amount, Quantity = quantity, ByPortion = byPortion, Counts = counts,
+            Detail = quantity == item.Quantity && item.Detail.Length > 0 ? item.Detail : $"{quantity} шт." };
+    }
     public ReceiptDto Delete(string id, ChangeRequest request) => Change(request, () =>
     {
         var index = Index(id);
-        deleted = new(items[index], index, assignments.GetValueOrDefault(id) ?? []);
         items.RemoveAt(index);
         assignments.Remove(id);
     });
-    public ReceiptDto Undo(ChangeRequest request) => Change(request, () =>
-    {
-        if (deleted is null) throw new ReceiptException(404, "Нет удаления для отмены.");
-        items.Insert(Math.Min(deleted.Index, items.Count), deleted.Item);
-        assignments[deleted.Item.Id] = deleted.Owners;
-        deleted = null;
-    });
     public ReceiptDto Select(string id, string personId, SelectionRequest request) => Change(request, () =>
     {
-        Index(id);
+        var index = Index(id);
+        var item = items[index];
         if (!participants.Any(p => p.Id == personId)) throw new ReceiptException(400, "Неизвестный участник.");
         var owners = (assignments.GetValueOrDefault(id) ?? []).ToHashSet();
         // Передаём желаемое состояние, а не команду toggle: смысл запроса однозначен.
-        if (request.Selected == true) owners.Add(personId); else owners.Remove(personId);
+        if (item.ByPortion)
+        {
+            if (request.Count is not int count || count < 0 || count > item.Quantity || request.Selected != (count > 0))
+                throw new ReceiptException(400, "Укажите количество выбранных порций.");
+            var counts = new Dictionary<string, int>(item.Counts ?? []);
+            if (count == 0) counts.Remove(personId); else counts[personId] = count;
+            if (counts.Values.Sum() > item.Quantity) throw new ReceiptException(409, "Свободных порций уже нет.");
+            items[index] = item with { Counts = counts };
+            owners = counts.Keys.ToHashSet();
+        }
+        else
+        {
+            if (request.Count.HasValue) throw new ReceiptException(400, "Эта позиция делится поровну.");
+            if (request.Selected == true) owners.Add(personId); else owners.Remove(personId);
+        }
         assignments[id] = participants.Where(p => owners.Contains(p.Id)).Select(p => p.Id).ToArray();
     });
     public ReceiptDto Reset(ChangeRequest request) => Change(request, () =>
     {
         assignments.Clear();
-        if (deleted is not null) deleted = deleted with { Owners = [] };
+        for (int i = 0; i < items.Count; i++) items[i] = items[i] with { Counts = null };
     });
 
     // Отдаём снимок состояния, не раскрывая изменяемые коллекции бизнес-логики.
     private ReceiptDto Snapshot() => new(participants.ToArray(), items.ToArray(),
         assignments.ToDictionary(pair => pair.Key, pair => pair.Value.ToArray()),
         ReceiptCalculator.Calculate(items, assignments, participants), revision, instanceId,
-        deleted is null ? null : deleted with { Owners = deleted.Owners.ToArray() }, receiptId, title, createdAt);
+        receiptId, title, createdAt);
 }

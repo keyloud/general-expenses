@@ -17,14 +17,14 @@ public sealed class PostgresFactAttribute : FactAttribute
     }
 }
 
-public sealed class PostgresTests
+public sealed partial class PostgresTests
 {
     private static ChangeRequest Version(ReceiptDto s) => new() { InstanceId = s.InstanceId, Revision = s.Revision };
     private static ItemRequest Item(ReceiptDto s, string name, long amount) => new() { InstanceId = s.InstanceId, Revision = s.Revision, Name = name, Amount = amount };
-    private static SelectionRequest Select(ReceiptDto s) => new() { InstanceId = s.InstanceId, Revision = s.Revision, Selected = true };
+    private static SelectionRequest Select(ReceiptDto s) => new() { InstanceId = s.InstanceId, Revision = s.Revision, Selected = true, AdminMode = true };
 
     [PostgresFact]
-    public async Task PersistenceUndoResetAndEmptyReceiptSurviveNewContexts()
+    public async Task PersistenceDeleteResetAndEmptyReceiptSurviveNewContexts()
     {
         await using var database = await TestDatabase.CreateAsync();
         var state = await database.Run(s => s.ReadAsync());
@@ -37,21 +37,18 @@ public sealed class PostgresTests
         Assert.Equal(50000, state.Result.Totals["boris"]);
         state = await database.Run(s => s.DeleteAsync("pizza", Version(state)));
         state = await database.Run(s => s.ReadAsync());
-        Assert.Equal("pizza", state.Deleted!.Item.Id);
-        state = await database.Run(s => s.UndoAsync(Version(state)));
-        Assert.Equal("pizza", state.Items[0].Id);
-        Assert.Equal(50001, state.Result.Totals["anya"]);
-        state = await database.Run(s => s.DeleteAsync("pizza", Version(state)));
-        // Второе удаление должно заменить предыдущую возможность отмены.
-        state = await database.Run(s => s.DeleteAsync("pasta", Version(state)));
-        state = await database.Run(s => s.UndoAsync(Version(state)));
+        await using (var check = database.Context())
+        {
+            Assert.False(await check.Set<ItemEntity>().AnyAsync(i => i.Id == "pizza"));
+            Assert.False(await check.Set<AssignmentEntity>().AnyAsync(a => a.ItemId == "pizza"));
+        }
         Assert.DoesNotContain(state.Items, i => i.Id == "pizza");
         Assert.Contains(state.Items, i => i.Id == "pasta");
         state = await database.Run(s => s.SelectAsync("pasta", "anya", Select(state)));
         state = await database.Run(s => s.DeleteAsync("pasta", Version(state)));
         state = await database.Run(s => s.ResetAsync(Version(state)));
-        state = await database.Run(s => s.UndoAsync(Version(state)));
-        Assert.Empty(state.Assignments["pasta"]);
+
+        Assert.False(state.Assignments.ContainsKey("pasta"));
         foreach (var item in state.Items) state = await database.Run(s => s.DeleteAsync(item.Id, Version(state)));
         state = await database.Run(s => s.ReadAsync());
         Assert.Empty(state.Items);
@@ -89,7 +86,7 @@ public sealed class PostgresTests
     }
 
     [PostgresFact]
-    public async Task SeparateReceiptsKeepItemsSelectionsAndUndoIsolated()
+    public async Task SeparateReceiptsKeepItemsAndSelectionsIsolated()
     {
         await using var database = await TestDatabase.CreateAsync();
         var first = await database.Run(s => s.CreateAsync(new() { RequestId = Guid.NewGuid(), Title = "Обед", Participants = ["Лена", "Миша"] }));
@@ -109,17 +106,50 @@ public sealed class PostgresTests
         first = await database.Run(s => s.DeleteAsync(itemId, Version(first), receiptId: first.Id));
         second = await database.Run(s => s.ResetAsync(Version(second), receiptId: second.Id));
         first = await database.Run(s => s.ReadAsync(receiptId: first.Id));
-        Assert.NotNull(first.Deleted);
-        first = await database.Run(s => s.UndoAsync(Version(first), receiptId: first.Id));
-        Assert.Equal(10001, first.Result.Total);
-        Assert.Equal(5001, first.Result.Totals[first.Participants[0].Id]);
+        Assert.Empty(first.Items);
         Assert.Empty((await database.Run(s => s.ReadAsync(receiptId: second.Id))).Items);
         await using var db = database.Context();
         var cards = await new ReceiptStore(db, new TestUser(-1)).ListAsync();
         Assert.Equal(3, cards.Length); // Два новых и исходный демочек.
-        Assert.Equal(10001, cards.Single(x => x.Id == first.Id).Total);
+        Assert.Equal(0, cards.Single(x => x.Id == first.Id).Total);
         Assert.Equal(0, cards.Single(x => x.Id == second.Id).Total);
         Assert.Equal(404, (await Assert.ThrowsAsync<ReceiptException>(() => database.Run(s => s.ReadAsync(receiptId: "missing")))).Status);
+    }
+
+    [PostgresFact]
+    public async Task SwitchingSplitModeKeepsEveryoneWhoSelectedTheItem()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var state = await database.Run(s => s.ReadAsync());
+        ItemRequest Beer(bool byPortion, int quantity = 5) => new()
+        {
+            Name = "Пиво", Amount = quantity * 30000, ByPortion = byPortion, Quantity = quantity,
+            Revision = state.Revision, InstanceId = state.InstanceId
+        };
+        SelectionRequest Take(int count) => new()
+        {
+            Selected = true, Count = count, AdminMode = true, Revision = state.Revision, InstanceId = state.InstanceId
+        };
+        state = await database.Run(s => s.AddAsync(Beer(true)));
+        var id = state.Items.Last().Id;
+        state = await database.Run(s => s.SelectAsync(id, "boris", Take(1)));
+        state = await database.Run(s => s.SelectAsync(id, "anya", Take(2)));
+        state = await database.Run(s => s.EditAsync(id, Beer(false)));
+        state = await database.Run(s => s.ReadAsync());
+        Assert.Equal(new[] { "anya", "boris" }, state.Assignments[id]);
+        Assert.Null(state.Items.Single(i => i.Id == id).Counts);
+        Assert.Equal(75000, state.Result.Totals["anya"]);
+        Assert.Equal(75000, state.Result.Totals["boris"]);
+        Assert.Equal(0, state.Result.Totals["vika"]);
+        Assert.Equal(400, (await Assert.ThrowsAsync<ReceiptException>(() =>
+            database.Run(s => s.EditAsync(id, Beer(true, 1))))).Status);
+        state = await database.Run(s => s.EditAsync(id, Beer(true)));
+        state = await database.Run(s => s.ReadAsync());
+        var counts = state.Items.Single(i => i.Id == id).Counts!;
+        Assert.Equal(3, counts["anya"]);
+        Assert.Equal(2, counts["boris"]);
+        Assert.Equal(90000, state.Result.Totals["anya"]);
+        Assert.Equal(60000, state.Result.Totals["boris"]);
     }
 
     [PostgresFact]
@@ -172,7 +202,6 @@ public sealed class PostgresTests
             s => s.DeleteAsync(item, Version(owned), receiptId: owned.Id),
             s => s.SelectAsync(item, owned.Participants[0].Id, Select(owned), receiptId: owned.Id),
             s => s.ResetAsync(Version(owned), receiptId: owned.Id),
-            s => s.UndoAsync(Version(owned), receiptId: owned.Id),
             s => s.CreateAsync(request)
         ];
         foreach (var action in forbidden)
@@ -187,14 +216,134 @@ public sealed class PostgresTests
         Assert.Equal(owned.Revision, after.Revision);
         Assert.Equal(10001, after.Result.Total);
     }
-    private sealed record TestUser(long Id) : ICurrentUser;
+    [PostgresFact]
+    public async Task PersonalInviteCanBeClaimedOnceAndOnlyGrantsOwnSelection()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await using (var db = database.Context())
+        {
+            db.Users.AddRange(new UserEntity { Id = 101, Name = "Аня" }, new UserEntity { Id = 202, Name = "Вика" });
+            await db.SaveChangesAsync();
+        }
+        async Task<T> Invite<T>(long id, Func<InvitationStore, Task<T>> action)
+        {
+            await using var db = database.Context();
+            return await action(new InvitationStore(db, new TestUser(id)));
+        }
+        const string receipt = "demo";
+        var old = await Invite(-1, s => s.Issue(receipt, "anya", default));
+        var fresh = await Invite(-1, s => s.Issue(receipt, "anya", default));
+        Assert.Equal(404, (await Assert.ThrowsAsync<ReceiptException>(() => Invite(101, s => s.Preview(old.Token, default)))).Status);
+        var info = await Invite(101, s => s.Preview(fresh.Token, default));
+        Assert.Equal("Аня", info.ParticipantName);
+        async Task<long> TryAccept(long id)
+        {
+            try { await Invite(id, s => s.Accept(fresh.Token, default)); return id; }
+            catch (ReceiptException e) when (e.Status == 404) { return 0; }
+        }
+        var winners = await Task.WhenAll(TryAccept(101), TryAccept(202));
+        var winner = Assert.Single(winners, id => id != 0);
+        Assert.Equal(receipt, (await Invite(winner, s => s.Accept(fresh.Token, default))).ReceiptId);
+        var another = await Invite(-1, s => s.Issue(receipt, "boris", default));
+        Assert.Equal(409, (await Assert.ThrowsAsync<ReceiptException>(() => Invite(winner, s => s.Accept(another.Token, default)))).Status);
+        Assert.Equal(404, (await Assert.ThrowsAsync<ReceiptException>(() => Invite(winner, s => s.Issue(receipt, "boris", default)))).Status);
+        var ownerView = await database.Run(s => s.ReadAsync());
+        Assert.Null(ownerView.MyParticipantId);
+        Assert.True(ownerView.Participants.Single(p => p.Id == "anya").Joined);
+        var selected = await database.Run(s => s.SelectAsync("pizza", "boris", Select(ownerView)));
+        var guest = await database.Run(s => s.SelectAsync("pizza", "anya", Select(selected)), winner);
+        Assert.Equal("anya", guest.MyParticipantId);
+        Assert.Equal(45000, guest.Result.Totals["anya"]);
+        Assert.Equal(45000, (await database.Run(s => s.ReadAsync())).Result.Totals["boris"]);
+        foreach (Func<ReceiptStore, Task<ReceiptDto>> action in new Func<ReceiptStore, Task<ReceiptDto>>[] {
+            s => s.SelectAsync("pizza", "boris", Select(guest)), s => s.DeleteAsync("pizza", Version(guest)),
+            s => s.EditAsync("pizza", Item(guest, "Чужая правка", 500)), s => s.ResetAsync(Version(guest)), s => s.AddAsync(Item(guest, "Суп", 100)) })
+            Assert.Equal(403, (await Assert.ThrowsAsync<ReceiptException>(() => database.Run(action, winner))).Status);
+        await using var check = database.Context();
+        Assert.Equal(receipt, Assert.Single(await new ReceiptStore(check, new TestUser(winner)).ListAsync()).Id);
+        var boris = await check.Set<ParticipantEntity>().SingleAsync(p => p.Id == "boris");
+        boris.InviteExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        await check.SaveChangesAsync();
+        Assert.Equal(404, (await Assert.ThrowsAsync<ReceiptException>(() => Invite(202, s => s.Accept(another.Token, default)))).Status);
+    }
+
+    [PostgresFact]
+    public async Task OnlyOwnerCanDeleteCurrentVersionAndDeletionSurvivesRestart()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await using var db = database.Context();
+        var owner = new ReceiptStore(db, new TestUser(-1));
+        var guest = new ReceiptStore(db, new TestUser(101));
+        var invite = new InvitationStore(db, new TestUser(-1));
+        db.Users.Add(new UserEntity { Id = 101, Name = "Аня" });
+        await db.SaveChangesAsync();
+        var initial = await owner.ReadAsync();
+        var code = await invite.Issue(initial.Id, "anya", default);
+        var guestInvite = new InvitationStore(db, new TestUser(101));
+        await guestInvite.Accept(code.Token, default);
+        var joined = await guest.ReadAsync();
+        var latest = await database.Run(s => s.SelectAsync("pizza", "anya", Select(joined)), 101);
+
+        Assert.True(Assert.Single(await owner.ListAsync()).CanDelete);
+        Assert.False(Assert.Single(await guest.ListAsync()).CanDelete);
+        Assert.Equal(404, (await Assert.ThrowsAsync<ReceiptException>(() => guest.DeleteReceiptAsync(initial.Id, Version(latest)))).Status);
+        Assert.Equal(409, (await Assert.ThrowsAsync<ReceiptException>(() => owner.DeleteReceiptAsync(initial.Id, Version(initial)))).Status);
+
+        var request = new CreateReceiptRequest { RequestId = Guid.NewGuid(), Title = "Кофе", Participants = ["Аня"] };
+        var other = await owner.CreateAsync(request);
+        await owner.DeleteReceiptAsync(initial.Id, Version(latest));
+        Assert.Equal(other.Id, Assert.Single(await owner.ListAsync()).Id);
+        Assert.Empty(await guest.ListAsync());
+        Assert.Equal(404, (await Assert.ThrowsAsync<ReceiptException>(() => guest.ReadAsync())).Status);
+        Assert.Equal(404, (await Assert.ThrowsAsync<ReceiptException>(() => guestInvite.Accept(code.Token, default))).Status);
+        Assert.False(await db.Set<AssignmentEntity>().AnyAsync(a => a.ReceiptId == initial.Id));
+        Assert.False(await db.Set<ItemEntity>().AnyAsync(i => i.ReceiptId == initial.Id));
+        Assert.False(await db.Set<ParticipantEntity>().AnyAsync(p => p.ReceiptId == initial.Id));
+        Assert.True(await db.Users.AnyAsync(u => u.Id == 101));
+
+        await owner.DeleteReceiptAsync(other.Id, Version(other));
+        Assert.Equal(409, (await Assert.ThrowsAsync<ReceiptException>(() => owner.CreateAsync(request))).Status);
+        await using var restarted = database.Context();
+        await ReceiptStore.InitializeAsync(restarted);
+        Assert.Empty(await new ReceiptStore(restarted, new TestUser(-1)).ListAsync());
+    }
+
+    [PostgresFact]
+    public async Task OwnerClaimsOneSeatAndOnlyExplicitAdminCanSelectForOthers()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await using var db = database.Context();
+        var owner = new ReceiptStore(db, new TestUser(-1));
+        var old = await owner.ReadAsync();
+        Assert.Equal(403, (await Assert.ThrowsAsync<ReceiptException>(() =>
+            owner.SelectAsync("pizza", "anya", Select(old)))).Status);
+        var mine = await owner.IdentifyOwnerAsync("demo", "anya");
+        Assert.True(mine.IsOwner);
+        Assert.False(mine.CanSelectForOthers);
+        Assert.Equal("anya", mine.MyParticipantId);
+        Assert.Equal(409, (await Assert.ThrowsAsync<ReceiptException>(() => owner.IdentifyOwnerAsync("demo", "boris"))).Status);
+        var selected = await owner.SelectAsync("pizza", "anya", Select(mine));
+        Assert.Equal(403, (await Assert.ThrowsAsync<ReceiptException>(() => owner.SelectAsync("pizza", "boris", Select(selected)))).Status);
+        Assert.Equal(403, (await Assert.ThrowsAsync<ReceiptException>(() => owner.ResetAsync(Version(selected)))).Status);
+
+        var admin = new ReceiptStore(db, new TestUser(-1, true));
+        var ordinary = new SelectionRequest { Selected = true, InstanceId = selected.InstanceId, Revision = selected.Revision };
+        Assert.Equal(403, (await Assert.ThrowsAsync<ReceiptException>(() => admin.SelectAsync("pizza", "boris", ordinary))).Status);
+        var updated = await admin.SelectAsync("pizza", "boris", Select(selected));
+        Assert.Equal(new[] { "anya", "boris" }, updated.Assignments["pizza"]);
+        var outsider = new ReceiptStore(db, new TestUser(999, true));
+        Assert.Equal(404, (await Assert.ThrowsAsync<ReceiptException>(() => outsider.SelectAsync("pizza", "boris", Select(updated)))).Status);
+    }
+
+    private sealed record TestUser(long Id, bool CanSelectForOthers = false) : ICurrentUser;
     private sealed class TestDatabase(string connection, string admin, string name) : IAsyncDisposable
     {
         public ExpensesDbContext Context() => new(new DbContextOptionsBuilder<ExpensesDbContext>().UseNpgsql(connection).Options);
         public async Task<ReceiptDto> Run(Func<ReceiptStore, Task<ReceiptDto>> action, long userId = -1)
         {
             await using var db = Context();
-            return await action(new ReceiptStore(db, new TestUser(userId)));
+            // Сценарии расчёта выбирают за всю компанию под тестовым администратором.
+            return await action(new ReceiptStore(db, new TestUser(userId, CanSelectForOthers: userId == -1)));
         }
         public static async Task<TestDatabase> CreateAsync(bool legacy = false)
         {
@@ -217,6 +366,8 @@ public sealed class PostgresTests
                         INSERT INTO receipts ("Id", "InstanceId", "Revision") VALUES ('demo', 'old-instance', 7);
                         INSERT INTO participants ("ReceiptId", "Id", "Name", "Initial", "Position") VALUES ('demo', 'anya', 'Аня', 'А', 0);
                         INSERT INTO items ("ReceiptId", "Id", "Name", "Detail", "Amount", "Position", "IsDeleted") VALUES ('demo', 'pizza', 'Пицца', '', 90000, 0, false);
+                        INSERT INTO items ("ReceiptId", "Id", "Name", "Detail", "Amount", "Position", "IsDeleted") VALUES ('demo', 'removed', 'Удалено', '', 10000, 1, true);
+                        INSERT INTO assignments ("ReceiptId", "ItemId", "ParticipantId") VALUES ('demo', 'removed', 'anya');
                         INSERT INTO assignments ("ReceiptId", "ItemId", "ParticipantId") VALUES ('demo', 'pizza', 'anya');
                         """);
                 }
