@@ -13,6 +13,7 @@ try {
     if (Test-Path $telegramPath) {
         $telegram = Get-Content $telegramPath -Raw | ConvertFrom-Json
         $env:Telegram__BotToken = $telegram.BotToken
+        $env:Telegram__AdminUserId = [string]$telegram.AdminUserId
     }
     $keyPath = Join-Path $projectRoot '.local/development-login.key'
     if (!(Test-Path $keyPath)) {

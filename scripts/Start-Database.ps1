@@ -10,6 +10,11 @@ if (-not (Test-Path "$bin/pg_ctl.exe")) {
     throw 'Сначала распакуйте PostgreSQL: см. README, раздел первоначальной установки.'
 }
 if ($Stop) {
+    # Код 3 у pg_ctl status означает, что кластер уже остановлен.
+    if (!(Test-Path "$data/PG_VERSION")) { return }
+    & "$bin/pg_ctl.exe" -D $data status *> $null
+    if ($LASTEXITCODE -eq 3) { return }
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось проверить состояние PostgreSQL.' }
     & "$bin/pg_ctl.exe" -D $data -m fast -w stop
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось остановить PostgreSQL.' }
     return
