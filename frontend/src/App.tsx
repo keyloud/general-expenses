@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { JoinPage } from './Invitations';
 import { ReceiptPage } from './ReceiptPage';
 import { ReceiptsPage } from './ReceiptsPage';
 
@@ -11,7 +12,11 @@ export function App() {
     window.addEventListener('hashchange', navigate);
     return () => window.removeEventListener('hashchange', navigate);
   }, []);
-  if (!hash || hash === '#' || hash === '#/') return <ReceiptsPage />;
+  // При первом запуске Telegram передаёт параметры Mini App во фрагменте URL.
+  const launchedByTelegram = new URLSearchParams(hash.slice(1)).has('tgWebAppData');
+  if (!hash || hash === '#' || hash === '#/' || launchedByTelegram) return <ReceiptsPage />;
+  const invite = /^#\/invite\/([a-f0-9]{48})$/.exec(hash);
+  if (invite) return <JoinPage key={invite[1]} token={invite[1]} />;
   const match = /^#\/receipts\/([a-zA-Z0-9-]+)$/.exec(hash);
   // key создаёт новое состояние для нового счёта: выбор и формы не «переезжают» между счетами.
   if (match) return <ReceiptPage key={match[1]} receiptId={match[1]} />;

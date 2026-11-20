@@ -5,7 +5,11 @@ import s from './App.module.css';
 type User = { id: string; name: string; username: string | null; isLocal: boolean };
 declare global {
   interface Window {
-    Telegram?: { WebApp: { initData: string; ready(): void; expand(): void } };
+    Telegram?: { WebApp: {
+      initData: string; ready(): void; expand(): void;
+      isVersionAtLeast?(version: string): boolean;
+      shareMessage?(id: string, callback: (sent: boolean) => void): void;
+    } };
   }
 }
 
@@ -37,6 +41,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [key, setKey] = useState('');
   const [busy, setBusy] = useState(false);
   const inTelegram = Boolean(window.Telegram?.WebApp.initData);
+  const localDevelopment = import.meta.env.DEV;
   useEffect(() => {
     let active = true;
     initialLogin ??= enter();
@@ -77,9 +82,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
       {loading ? <p role="status">Проверяем вход…</p> : <>
         {inTelegram ? <><p>Для повторного входа закройте Mini App и откройте его заново.</p>
           <button className={s.addButton} onClick={() => window.location.reload()}>Повторить подключение</button></> :
-          <><p>Откройте приложение через Telegram или войдите в локальный аккаунт разработчика.</p>
+          <><p>{localDevelopment ? 'Откройте приложение через Telegram или войдите в локальный аккаунт разработчика.' : 'Откройте приложение кнопкой меню в чате с ботом.'}</p>
             <a className={s.backLink} href="https://t.me/porovnu_expenses_bot" target="_blank" rel="noreferrer">Перейти к боту ↗</a>
-            <details className={s.localLogin}><summary>Локальная разработка</summary>
+            {localDevelopment && <details className={s.localLogin}><summary>Локальная разработка</summary>
               <form onSubmit={localLogin}>
                 <label htmlFor="local-key">Ключ локального входа</label>
                 <input id="local-key" type="password" autoComplete="off" required maxLength={256}
@@ -87,7 +92,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
                 <p>Ключ находится в файле .local/development-login.key в папке проекта.</p>
                 <button className={s.addButton} disabled={busy}>{busy ? 'Входим…' : 'Войти локально'}</button>
               </form>
-            </details></>}
+            </details>}</>}
         {error && <p className={s.errorBox} role="alert">{error}</p>}
       </>}
     </section>

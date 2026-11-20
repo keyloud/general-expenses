@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ApiError, requestReceipt, type Receipt } from './api';
+import { ApiError, requestJson, requestReceipt, type Receipt } from './api';
 
 export function useReceipt(receiptId: string) {
   const [receipt, setReceipt] = useState<Receipt | null>(null);
@@ -23,7 +23,7 @@ export function useReceipt(receiptId: string) {
       return true;
     } catch (cause) {
       const message = cause instanceof ApiError ? cause.message : 'Нет связи с сервером.';
-      setError(`${message} Обновите чек перед повтором. Введённые данные сохранены.`);
+      setError(cause instanceof ApiError && cause.status < 500 ? message : `${message} Обновите чек перед повтором. Введённые данные сохранены.`);
       return false;
     } finally {
       inFlight.current = false;
@@ -33,5 +33,23 @@ export function useReceipt(receiptId: string) {
 
   // Начальная загрузка. Повторный вызов эффекта в StrictMode отсечёт inFlight.
   useEffect(() => { void perform(); }, []);
+  // У других участников меняются и свободные порции, и статусы подтверждения.
+  // Фоновая загрузка не блокирует форму и не затирает более свежий ответ на запись.
+  useEffect(() => {
+    const controller = new AbortController();
+    let reading = false;
+    async function refresh() {
+      if (document.hidden || inFlight.current || reading) return;
+      reading = true;
+      try {
+        const next = await requestJson<Receipt>('/receipts/' + encodeURIComponent(receiptId), 'GET', undefined, controller.signal);
+        if (!controller.signal.aborted && !inFlight.current)
+          setReceipt(old => old && next.revision > old.revision ? next : old);
+      } catch { /* Кнопка обновления позволяет повторить запрос с сообщением об ошибке. */ }
+      finally { reading = false; }
+    }
+    const timer = window.setInterval(refresh, 6000);
+    return () => { clearInterval(timer); controller.abort(); };
+  }, [receiptId]);
   return { receipt, busy, error, perform };
 }

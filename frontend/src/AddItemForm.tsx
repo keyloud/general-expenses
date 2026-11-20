@@ -4,7 +4,7 @@ import { parsePrice } from './price';
 import s from './App.module.css';
 
 type Props = {
-  onAdd: (name: string, amount: number) => Promise<boolean>;
+  onAdd: (name: string, amount: number, quantity: number, byPortion: boolean) => Promise<boolean>;
   initialItem?: Item;
   onCancel?: () => void;
 };
@@ -12,7 +12,9 @@ type Props = {
 export function AddItemForm({ onAdd, initialItem, onCancel }: Props) {
   const prefix = useId();
   const [name, setName] = useState(initialItem?.name ?? '');
-  const [price, setPrice] = useState(initialItem ? (initialItem.amount / 100).toFixed(2).replace('.', ',') : '');
+  const [quantity, setQuantity] = useState(String(initialItem?.quantity ?? 1));
+  const [byPortion, setByPortion] = useState(initialItem?.byPortion ?? false);
+  const [price, setPrice] = useState(initialItem ? (initialItem.amount / initialItem.quantity / 100).toFixed(2).replace('.', ',') : '');
   const [errors, setErrors] = useState<{ name?: string; price?: string }>({});
   const [message, setMessage] = useState('');
   const nameInput = useRef<HTMLInputElement>(null);
@@ -34,27 +36,37 @@ export function AddItemForm({ onAdd, initialItem, onCancel }: Props) {
       return;
     }
     // Очищаем черновик только после подтверждения сервера. При ошибке можно исправить или повторить ввод.
-    const saved = await onAdd(trimmedName, amount!);
+    const count = Number(quantity);
+    if (!Number.isInteger(count) || count < 1 || count > 999 || count * amount! > 100_000_000) {
+      setMessage('Допустимо от 1 до 999 порций и до 1 000 000 ₽ за строку.'); return;
+    }
+    const saved = await onAdd(trimmedName, amount! * count, count, byPortion);
     if (!saved) return;
     if (initialItem) return;
     setName('');
     setPrice('');
+    setQuantity('1'); setByPortion(false);
     setMessage(`Добавлено: ${trimmedName}. Теперь выберите участников для этой позиции.`);
     nameInput.current?.focus();
   }
 
   return <form className={s.addForm} onSubmit={submit} noValidate aria-labelledby={`${prefix}-title`}>
     <h3 id={`${prefix}-title`}>{initialItem ? 'Редактировать позицию' : 'Добавить в чек'}</h3>
-    <p>Одна позиция или порция. Её можно разделить между друзьями.</p>
     <div className={s.formFields}>
       <div><label htmlFor={`${prefix}-item-name`}>Название блюда</label>
         <input ref={nameInput} autoFocus={!!initialItem} id={`${prefix}-item-name`} value={name} maxLength={100} placeholder="Например, чизкейк" aria-invalid={!!errors.name} aria-describedby={errors.name ? `${prefix}-name-error` : undefined} onChange={e => { setName(e.target.value); setErrors(old => ({ ...old, name: undefined })); setMessage(''); }} />
         {errors.name && <span id={`${prefix}-name-error`} className={s.error}>{errors.name}</span>}
       </div>
-      <div><label htmlFor={`${prefix}-item-price`}>Цена, ₽</label>
+      <div><label htmlFor={`${prefix}-item-price`}>Цена за единицу, ₽</label>
         <input ref={priceInput} id={`${prefix}-item-price`} value={price} inputMode="decimal" maxLength={16} placeholder="350,00" aria-invalid={!!errors.price} aria-describedby={errors.price ? `${prefix}-price-error` : undefined} onChange={e => { setPrice(e.target.value); setErrors(old => ({ ...old, price: undefined })); setMessage(''); }} />
         {errors.price && <span id={`${prefix}-price-error`} className={s.error}>{errors.price}</span>}
       </div>
+      <div><label htmlFor={`${prefix}-qty`}>Количество</label>
+        <input id={`${prefix}-qty`} type="number" min="1" max="999" step="1" value={quantity} onChange={e => setQuantity(e.target.value)} /></div>
+      <div><label htmlFor={`${prefix}-mode`}>Как делить строку</label>
+        <select id={`${prefix}-mode`} value={byPortion ? 'portions' : 'equal'} onChange={e => setByPortion(e.target.value === 'portions')}>
+          <option value="equal">Поровну между выбравшими</option><option value="portions">По порциям</option>
+        </select></div>
     </div>
     <button className={s.addButton} type="submit">{initialItem ? 'Сохранить изменения' : '+ Добавить позицию'}</button>{onCancel && <button type="button" className={s.cancelEdit} onClick={onCancel}>Отмена</button>}
     <div className={s.formMessage} role="status">{message}</div>
